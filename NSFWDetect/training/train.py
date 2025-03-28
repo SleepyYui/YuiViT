@@ -15,6 +15,7 @@ from config import (
 )
 from models.vit_model import ViTModel
 from data.dataset import NSFWDataset
+from utils.tensorboard import NSFWTensorBoard
 
 class NSFWTrainer:
     """
@@ -76,11 +77,15 @@ class NSFWTrainer:
         self.val_f1 = tf.keras.metrics.F1Score(name='val_f1', average='weighted')
 
         # Set up TensorBoard
-        current_time = time.strftime("%Y%m%d-%H%M%S")
-        self.train_log_dir = self.tensorboard_dir / f'train_{current_time}'
-        self.val_log_dir = self.tensorboard_dir / f'val_{current_time}'
-        self.train_summary_writer = tf.summary.create_file_writer(str(self.train_log_dir))
-        self.val_summary_writer = tf.summary.create_file_writer(str(self.val_log_dir))
+        self.tensorboard = NSFWTensorBoard(
+            log_dir=str(self.tensorboard_dir),
+            histogram_freq=1,
+            update_freq='epoch'
+        )
+
+        # Set class names for TensorBoard
+        class_names = [dataset.class_names[i] for i in range(len(dataset.class_names))]
+        self.tensorboard.set_class_names(class_names)
 
         # Set up loss function with class weights
         self.class_weights = self.dataset.get_class_weights()
@@ -119,8 +124,8 @@ class NSFWTrainer:
                 lambda: lr_schedule(step - self.warmup_steps)
             )
 
-        # Create AdamW optimizer
-        optimizer = tfa.optimizers.AdamW(
+        # Create AdamW optimizer (using Keras implementation instead of tensorflow_addons)
+        optimizer = tf.keras.optimizers.AdamW(
             learning_rate=lr_fn,
             weight_decay=self.weight_decay,
             beta_1=0.9,
@@ -233,6 +238,9 @@ class NSFWTrainer:
         train_ds = self.dataset.get_train_dataset()
         val_ds = self.dataset.get_val_dataset()
 
+        # Get TensorBoard callback for the model
+        tensorboard_callback = self.tensorboard.get_callback(self.model)
+
         # Initialize training history
         history = {
             'train_loss': [], 'train_accuracy': [], 'train_f1': [],
@@ -282,7 +290,13 @@ class NSFWTrainer:
                     )
 
             # Validation phase
-            for images, labels in val_ds:
+            all_val_labels = []
+            all_val_predictions = []
+            sample_images = None
+            sample_labels = None
+            sample_preds = None
+
+            for i, (images, labels) in enumerate(val_ds):
                 loss, predictions = self._val_step(images, labels)
 
                 # Update metrics
@@ -291,6 +305,32 @@ class NSFWTrainer:
                 self.val_precision.update_state(labels, tf.nn.softmax(predictions))
                 self.val_recall.update_state(labels, tf.nn.softmax(predictions))
                 self.val_f1.update_state(labels, tf.nn.softmax(predictions))
+
+                # Save predictions and labels for confusion matrix
+                all_val_labels.append(tf.argmax(labels, axis=1).numpy())
+                all_val_predictions.append(tf.argmax(tf.nn.softmax(predictions), axis=1).numpy())
+
+                # Save first batch for prediction visualization
+                if i == 0:
+                    sample_images = images.numpy()
+                    sample_labels = tf.argmax(labels, axis=1).numpy()
+                    sample_preds = tf.argmax(tf.nn.softmax(predictions), axis=1).numpy()
+                    sample_probs = tf.nn.softmax(predictions).numpy()
+
+            # Concatenate all validation predictions and labels
+            all_val_labels = np.concatenate(all_val_labels)
+            all_val_predictions = np.concatenate(all_val_predictions)
+
+            # Log confusion matrix and sample predictions to TensorBoard
+            self.tensorboard.log_confusion_matrix(all_val_labels, all_val_predictions, epoch)
+            if sample_images is not None:
+                self.tensorboard.log_sample_predictions(
+                    sample_images, sample_labels, sample_preds, sample_probs, epoch
+                )
+
+            # Log learning rate to TensorBoard
+            self.tensorboard.log_model_weights_histogram(self.model, epoch)
+            self.tensorboard.log_learning_rate(self.optimizer, epoch)
 
             # Calculate epoch metrics
             train_loss = self.train_loss.result()
@@ -326,21 +366,14 @@ class NSFWTrainer:
             )
 
             # Write metrics to TensorBoard
-            with self.train_summary_writer.as_default():
+            with self.tensorboard.train_summary_writer.as_default():
                 tf.summary.scalar('loss', train_loss, step=epoch)
                 tf.summary.scalar('accuracy', train_accuracy, step=epoch)
                 tf.summary.scalar('precision', train_precision, step=epoch)
                 tf.summary.scalar('recall', train_recall, step=epoch)
                 tf.summary.scalar('f1', train_f1, step=epoch)
 
-                # Add learning rate to TensorBoard
-                if hasattr(self.optimizer, '_decayed_lr'):
-                    current_lr = self.optimizer._decayed_lr(tf.float32).numpy()
-                else:
-                    current_lr = self.optimizer.learning_rate.numpy()
-                tf.summary.scalar('learning_rate', current_lr, step=epoch)
-
-            with self.val_summary_writer.as_default():
+            with self.tensorboard.val_summary_writer.as_default():
                 tf.summary.scalar('loss', val_loss, step=epoch)
                 tf.summary.scalar('accuracy', val_accuracy, step=epoch)
                 tf.summary.scalar('precision', val_precision, step=epoch)

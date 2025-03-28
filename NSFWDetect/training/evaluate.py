@@ -13,6 +13,7 @@ from sklearn.metrics import confusion_matrix, classification_report, roc_curve, 
 from config import CATEGORY_MAPPING
 from models.vit_model import ViTModel
 from data.dataset import NSFWDataset
+from utils.tensorboard import NSFWTensorBoard
 
 class NSFWEvaluator:
     """
@@ -24,12 +25,14 @@ class NSFWEvaluator:
     - Precision-recall curves
     - Per-class metrics
     - Misclassification analysis
+    - TensorBoard integration for visualization
     """
     def __init__(
         self,
         model: ViTModel,
         dataset: NSFWDataset,
-        output_dir: str = "evaluation_results"
+        output_dir: str = "evaluation_results",
+        tensorboard: Optional[NSFWTensorBoard] = None
     ):
         self.model = model
         self.dataset = dataset
@@ -48,6 +51,11 @@ class NSFWEvaluator:
         self.test_recall = tf.keras.metrics.Recall()
         self.test_f1 = tf.keras.metrics.F1Score(average='weighted')
 
+        # Initialize TensorBoard if provided
+        self.tensorboard = tensorboard
+        if self.tensorboard is not None:
+            self.tensorboard.set_class_names(self.class_names)
+
     def evaluate(self) -> Dict[str, float]:
         """
         Evaluate the model on the test dataset.
@@ -60,24 +68,42 @@ class NSFWEvaluator:
         # Collect all predictions and ground truths
         all_predictions = []
         all_labels = []
+        all_images = []
+        all_pred_probs = []
+
+        sample_count = 0
+        max_samples_to_collect = 100  # Limit the number of images collected for memory reasons
 
         for images, labels in self.test_ds:
             predictions = self.model(images, training=False)
-            predictions = tf.nn.softmax(predictions)
+            predictions_softmax = tf.nn.softmax(predictions)
 
             # Update metrics
             self.test_accuracy.update_state(labels, predictions)
-            self.test_precision.update_state(labels, predictions)
-            self.test_recall.update_state(labels, predictions)
-            self.test_f1.update_state(labels, predictions)
+            self.test_precision.update_state(labels, predictions_softmax)
+            self.test_recall.update_state(labels, predictions_softmax)
+            self.test_f1.update_state(labels, predictions_softmax)
 
             # Store predictions and labels for later analysis
-            all_predictions.append(predictions.numpy())
+            all_predictions.append(predictions_softmax.numpy())
             all_labels.append(labels.numpy())
+            all_pred_probs.append(predictions_softmax.numpy())
+
+            # Collect some images for visualization
+            if sample_count < max_samples_to_collect:
+                batch_size = images.shape[0]
+                num_to_collect = min(batch_size, max_samples_to_collect - sample_count)
+                all_images.append(images[:num_to_collect].numpy())
+                sample_count += num_to_collect
 
         # Concatenate all predictions and labels
-        all_predictions = np.concatenate(all_predictions, axis=0)
-        all_labels = np.concatenate(all_labels, axis=0)
+        all_predictions_cat = np.concatenate(all_predictions, axis=0)
+        all_labels_cat = np.concatenate(all_labels, axis=0)
+        all_pred_probs_cat = np.concatenate(all_pred_probs, axis=0)
+
+        # Get argmax for predictions and labels
+        pred_classes = np.argmax(all_predictions_cat, axis=1)
+        true_classes = np.argmax(all_labels_cat, axis=1)
 
         # Calculate metrics
         accuracy = self.test_accuracy.result().numpy()
@@ -92,19 +118,49 @@ class NSFWEvaluator:
         logging.info(f"Test F1 Score: {f1:.4f}")
 
         # Generate confusion matrix
-        self._generate_confusion_matrix(all_predictions, all_labels)
+        self._generate_confusion_matrix(all_predictions_cat, all_labels_cat)
 
         # Generate ROC curves
-        self._generate_roc_curves(all_predictions, all_labels)
+        self._generate_roc_curves(all_predictions_cat, all_labels_cat)
 
         # Generate precision-recall curves
-        self._generate_pr_curves(all_predictions, all_labels)
+        self._generate_pr_curves(all_predictions_cat, all_labels_cat)
 
         # Generate classification report
-        self._generate_classification_report(all_predictions, all_labels)
+        self._generate_classification_report(all_predictions_cat, all_labels_cat)
 
         # Analyze misclassifications
-        self._analyze_misclassifications(all_predictions, all_labels)
+        self._analyze_misclassifications(all_predictions_cat, all_labels_cat)
+
+        # Log to TensorBoard if available
+        if self.tensorboard is not None:
+            logging.info("Logging evaluation results to TensorBoard...")
+
+            # Log confusion matrix
+            self.tensorboard.log_confusion_matrix(true_classes, pred_classes, step=0)
+
+            # Log PR curves
+            self.tensorboard.log_pr_curves(all_labels_cat, all_pred_probs_cat, step=0)
+
+            # Log sample predictions if we have collected images
+            if len(all_images) > 0:
+                sample_images = np.concatenate(all_images, axis=0)
+                sample_indices = np.random.choice(len(sample_images), size=min(9, len(sample_images)), replace=False)
+
+                self.tensorboard.log_sample_predictions(
+                    images=sample_images[sample_indices],
+                    true_labels=true_classes[sample_indices],
+                    predicted_labels=pred_classes[sample_indices],
+                    predicted_probs=all_pred_probs_cat[sample_indices],
+                    step=0
+                )
+
+            # Log scalar metrics
+            with self.tensorboard.val_summary_writer.as_default():
+                tf.summary.scalar('test_accuracy', accuracy, step=0)
+                tf.summary.scalar('test_precision', precision, step=0)
+                tf.summary.scalar('test_recall', recall, step=0)
+                tf.summary.scalar('test_f1', f1, step=0)
 
         # Return metrics
         return {

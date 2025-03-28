@@ -399,3 +399,82 @@ class NSFWVisualization:
         plt.close()
 
         logging.info(f"Prediction visualization saved to {self.output_dir / 'predictions.png'}")
+
+    def visualize_with_tensorboard(
+        self,
+        model: tf.keras.Model,
+        dataset: tf.data.Dataset,
+        log_dir: str = "logs/visualizations",
+        num_samples: int = 50
+    ):
+        """
+        Create advanced visualizations of the model using TensorBoard.
+
+        Args:
+            model: Model to visualize
+            dataset: Dataset for sample predictions
+            log_dir: Log directory for TensorBoard
+            num_samples: Number of samples to visualize
+        """
+        from utils.tensorboard import NSFWTensorBoard
+
+        # Initialize TensorBoard
+        tensorboard = NSFWTensorBoard(
+            log_dir=log_dir,
+            experiment_name=f"model_visualization",
+            histogram_freq=1
+        )
+
+        # Set class names
+        tensorboard.set_class_names(self.class_names)
+
+        # Write model graph
+        tensorboard._write_model_graph(model)
+
+        # Process samples for prediction visualization
+        all_images = []
+        all_labels = []
+        all_predictions = []
+        all_pred_probs = []
+
+        sample_count = 0
+        for images, labels in dataset:
+            # Get predictions
+            predictions = model(images, training=False)
+            pred_probs = tf.nn.softmax(predictions)
+            pred_classes = tf.argmax(pred_probs, axis=1)
+            true_classes = tf.argmax(labels, axis=1)
+
+            # Store data
+            all_images.append(images.numpy())
+            all_labels.append(true_classes.numpy())
+            all_predictions.append(pred_classes.numpy())
+            all_pred_probs.append(pred_probs.numpy())
+
+            # Update count
+            sample_count += images.shape[0]
+
+            if sample_count >= num_samples:
+                break
+
+        # Concatenate and trim
+        all_images = np.concatenate(all_images, axis=0)[:num_samples]
+        all_labels = np.concatenate(all_labels, axis=0)[:num_samples]
+        all_predictions = np.concatenate(all_predictions, axis=0)[:num_samples]
+        all_pred_probs = np.concatenate(all_pred_probs, axis=0)[:num_samples]
+
+        # Log samples
+        tensorboard.log_sample_predictions(
+            all_images, all_labels, all_predictions, all_pred_probs, step=0
+        )
+
+        # Log model weights
+        tensorboard.log_model_weights_histogram(model, step=0)
+
+        # Log PR curves
+        one_hot_labels = tf.keras.utils.to_categorical(all_labels, num_classes=len(self.class_names))
+        tensorboard.log_pr_curves(one_hot_labels, all_pred_probs, step=0)
+
+        print(f"Visualizations created in TensorBoard log directory: {log_dir}")
+        print("Start TensorBoard with:")
+        print(f"tensorboard --logdir={log_dir}")

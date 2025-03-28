@@ -6,6 +6,7 @@ import argparse
 import logging
 import tensorflow as tf
 from pathlib import Path
+import datetime
 
 from config import (
     IMAGE_SIZE, BATCH_SIZE, NUM_EPOCHS, LEARNING_RATE,
@@ -15,7 +16,7 @@ from models.vit_model import ViTModel
 from data.dataset import NSFWDataset
 from training.train import NSFWTrainer
 from training.evaluate import NSFWEvaluator
-import tensorflow_addons as tfa
+from utils.tensorboard import NSFWTensorBoard
 
 # Set up logging
 logging.basicConfig(
@@ -44,8 +45,33 @@ def parse_args():
                         help="Mode to run: train, evaluate, or both")
     parser.add_argument("--checkpoint", type=str, help="Path to checkpoint to load for evaluation")
     parser.add_argument("--output_dir", type=str, default="evaluation_results", help="Directory to save evaluation results")
+    parser.add_argument("--start_tensorboard", action="store_true", help="Automatically start TensorBoard server")
+    parser.add_argument("--tensorboard_port", type=int, default=6006, help="Port for TensorBoard server")
 
     return parser.parse_args()
+
+def start_tensorboard(log_dir, port=6006):
+    """Start TensorBoard server in a separate process."""
+    import subprocess
+    import webbrowser
+    import time
+
+    logging.info(f"Starting TensorBoard server at port {port}...")
+    process = subprocess.Popen(
+        ["tensorboard", f"--logdir={log_dir}", f"--port={port}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+
+    # Wait a moment for TensorBoard to start
+    time.sleep(3)
+
+    # Open browser
+    url = f"http://localhost:{port}/"
+    webbrowser.open(url)
+
+    logging.info(f"TensorBoard started at {url}")
+    return process
 
 def main():
     """Main function."""
@@ -70,13 +96,6 @@ def main():
     else:
         logging.warning("No GPU found, using CPU")
 
-    # Verify TensorFlow Addons is available
-    try:
-        logging.info(f"TensorFlow Addons version: {tfa.__version__}")
-    except:
-        logging.error("TensorFlow Addons not found. Please install with: pip install tensorflow-addons")
-        return
-
     # Create dataset
     logging.info(f"Creating dataset from {args.data_dir}")
     dataset = NSFWDataset(
@@ -90,69 +109,92 @@ def main():
     logging.info("Creating Vision Transformer model")
     model = ViTModel()
 
-    # Train or evaluate based on mode
-    if args.mode in ["train", "both"]:
-        # Create trainer
-        trainer = NSFWTrainer(
-            model=model,
-            dataset=dataset,
-            learning_rate=args.learning_rate,
-            weight_decay=args.weight_decay,
-            warmup_steps=WARMUP_STEPS,
-            checkpoint_dir=args.checkpoint_dir,
-            tensorboard_dir=args.tensorboard_dir,
-            use_mixed_precision=args.use_mixed_precision
-        )
+    # Create TensorBoard manager
+    tensorboard = NSFWTensorBoard(
+        log_dir=args.tensorboard_dir,
+        experiment_name=f"nsfw_detect_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        histogram_freq=1
+    )
 
-        # Train model
-        logging.info(f"Training model for {args.epochs} epochs")
-        history = trainer.train(epochs=args.epochs)
+    # Set class names for visualization
+    tensorboard.set_class_names(list(dataset.class_names))
 
-        # Log final metrics
-        logging.info(f"Final training metrics:")
-        logging.info(f"  Loss: {history['train_loss'][-1]:.4f}")
-        logging.info(f"  Accuracy: {history['train_accuracy'][-1]:.4f}")
-        logging.info(f"  F1 Score: {history['train_f1'][-1]:.4f}")
-        logging.info(f"Final validation metrics:")
-        logging.info(f"  Loss: {history['val_loss'][-1]:.4f}")
-        logging.info(f"  Accuracy: {history['val_accuracy'][-1]:.4f}")
-        logging.info(f"  F1 Score: {history['val_f1'][-1]:.4f}")
+    # Start TensorBoard if requested
+    tensorboard_process = None
+    if args.start_tensorboard:
+        tensorboard_process = start_tensorboard(args.tensorboard_dir, args.tensorboard_port)
 
-    if args.mode in ["evaluate", "both"]:
-        # Load checkpoint if evaluating only
-        if args.mode == "evaluate" and args.checkpoint:
-            logging.info(f"Loading checkpoint: {args.checkpoint}")
-            checkpoint = tf.train.Checkpoint(model=model)
-            checkpoint.restore(args.checkpoint).expect_partial()
+    try:
+        # Train or evaluate based on mode
+        if args.mode in ["train", "both"]:
+            # Create trainer with TensorBoard integration
+            trainer = NSFWTrainer(
+                model=model,
+                dataset=dataset,
+                learning_rate=args.learning_rate,
+                weight_decay=args.weight_decay,
+                warmup_steps=WARMUP_STEPS,
+                checkpoint_dir=args.checkpoint_dir,
+                tensorboard_dir=args.tensorboard_dir,
+                use_mixed_precision=args.use_mixed_precision
+            )
 
-        # Create evaluator
-        evaluator = NSFWEvaluator(
-            model=model,
-            dataset=dataset,
-            output_dir=args.output_dir
-        )
+            # Train model
+            logging.info(f"Training model for {args.epochs} epochs")
+            history = trainer.train(epochs=args.epochs)
 
-        # Evaluate model
-        logging.info("Evaluating model on test dataset")
-        metrics = evaluator.evaluate()
+            # Log final metrics
+            logging.info(f"Final training metrics:")
+            logging.info(f"  Loss: {history['train_loss'][-1]:.4f}")
+            logging.info(f"  Accuracy: {history['train_accuracy'][-1]:.4f}")
+            logging.info(f"  F1 Score: {history['train_f1'][-1]:.4f}")
+            logging.info(f"Final validation metrics:")
+            logging.info(f"  Loss: {history['val_loss'][-1]:.4f}")
+            logging.info(f"  Accuracy: {history['val_accuracy'][-1]:.4f}")
+            logging.info(f"  F1 Score: {history['val_f1'][-1]:.4f}")
 
-        # Log evaluation metrics
-        logging.info(f"Evaluation metrics:")
-        logging.info(f"  Accuracy: {metrics['accuracy']:.4f}")
-        logging.info(f"  Precision: {metrics['precision']:.4f}")
-        logging.info(f"  Recall: {metrics['recall']:.4f}")
-        logging.info(f"  F1 Score: {metrics['f1']:.4f}")
+        if args.mode in ["evaluate", "both"]:
+            # Load checkpoint if evaluating only
+            if args.mode == "evaluate" and args.checkpoint:
+                logging.info(f"Loading checkpoint: {args.checkpoint}")
+                checkpoint = tf.train.Checkpoint(model=model)
+                checkpoint.restore(args.checkpoint).expect_partial()
 
-        # Check if model meets target accuracy
-        if metrics['accuracy'] >= 0.95:
-            logging.info("🎉 SUCCESS: Model meets the target accuracy of 95% or higher!")
-        else:
-            logging.warning(f"⚠️ Model accuracy of {metrics['accuracy']:.2%} is below the target of 95%.")
-            logging.info("Consider the following actions:")
-            logging.info("- Increase training epochs")
-            logging.info("- Adjust learning rate or optimizer settings")
-            logging.info("- Try different data augmentation strategies")
-            logging.info("- Increase model capacity or try a different architecture")
+            # Create evaluator with TensorBoard integration
+            evaluator = NSFWEvaluator(
+                model=model,
+                dataset=dataset,
+                output_dir=args.output_dir,
+                tensorboard=tensorboard
+            )
+
+            # Evaluate model
+            logging.info("Evaluating model on test dataset")
+            metrics = evaluator.evaluate()
+
+            # Log evaluation metrics
+            logging.info(f"Evaluation metrics:")
+            logging.info(f"  Accuracy: {metrics['accuracy']:.4f}")
+            logging.info(f"  Precision: {metrics['precision']:.4f}")
+            logging.info(f"  Recall: {metrics['recall']:.4f}")
+            logging.info(f"  F1 Score: {metrics['f1']:.4f}")
+
+            # Check if model meets target accuracy
+            if metrics['accuracy'] >= 0.95:
+                logging.info("🎉 SUCCESS: Model meets the target accuracy of 95% or higher!")
+            else:
+                logging.warning(f"⚠️ Model accuracy of {metrics['accuracy']:.2%} is below the target of 95%.")
+                logging.info("Consider the following actions:")
+                logging.info("- Increase training epochs")
+                logging.info("- Adjust learning rate or optimizer settings")
+                logging.info("- Try different data augmentation strategies")
+                logging.info("- Increase model capacity or try a different architecture")
+
+    finally:
+        # Clean up TensorBoard process if it was started
+        if tensorboard_process is not None:
+            logging.info("Shutting down TensorBoard server...")
+            tensorboard_process.terminate()
 
 if __name__ == "__main__":
     main()
