@@ -1,10 +1,10 @@
 # NSFWDetect
 
 <div align="center">
-    <img src="https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python">
-    <img src="https://img.shields.io/badge/TensorFlow-2.15.0-orange?style=for-the-badge&logo=tensorflow">
+    <img src="https://img.shields.io/badge/Python-3.11%2B-blue?style=for-the-badge&logo=python">
+    <img src="https://img.shields.io/badge/TensorFlow-2.15.1-orange?style=for-the-badge&logo=tensorflow">
     <img src="https://img.shields.io/badge/Status-Production%20Ready-green?style=for-the-badge">
-    <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge">
+    <img src="https://img.shields.io/badge/License-BSD-yellow?style=for-the-badge">
     <br>
     <b>A YuiViT sub-project for high-accuracy NSFW content detection</b>
     <br>
